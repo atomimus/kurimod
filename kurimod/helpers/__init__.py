@@ -1,4 +1,5 @@
-kurimod - A monkeypatcher add-on for Kurigram/Pyrogram
+"""
+kurimod - A monkeypatcher add-on for Pyrogram
 Copyright (C) 2020 Cezar H. <https://github.com/usernein>
 
 This file is part of kurimod.
@@ -15,3 +16,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with kurimod.  If not, see <https://www.gnu.org/licenses/>.
+"""
+from .helpers import ikb, bki, ntb, btn, kb, kbtn, array_chunk, force_reply
+
+__all__ = ["ikb", "bki", "ntb", "btn", "kb", "kbtn", "array_chunk", "force_reply"]

@@ -1,12 +1,12 @@
 [project]
-name = "pyromod"
+name = "kurimod"
 version = "3.1.5"
-description = "A monkeypatcher add-on for Pyrogram that does conversation handling"
+description = "Kurimod: pyromod fork targeting the Kurigram (Pyrogram) client with conversation helpers"
 authors = [
     { name = "Pauxis", email = "pauxiscezar@gmail.com" }
 ]
 dependencies = [
-    "pyrogram >= 1.0"
+    "kurigram >= 2.0.0"
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
