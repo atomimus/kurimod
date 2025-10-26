@@ -13,7 +13,7 @@ from ..utils import should_patch, patch_into
 
 
 @patch_into(pyrogram.client.Client)
-class Client(pyrogram.client.Client.on_callback_query()):
+class Client(pyrogram.client.Client):
     listeners: Dict[ListenerTypes, List[Listener]]
     old__init__: Callable
 
