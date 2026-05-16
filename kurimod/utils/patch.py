@@ -18,7 +18,7 @@ You should have received a copy of the GNU General Public License
 along with kurimod.  If not, see <https://www.gnu.org/licenses/>.
 """
 from contextlib import contextmanager, asynccontextmanager
-from inspect import iscoroutinefunction
+from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import Callable, T, Type
 
 from pyrogram.sync import async_to_sync
@@ -41,8 +41,9 @@ def patch_into(target_class):
                 for i in ["is_property", "is_static", "is_context"]
             }
 
-            async_to_sync(container, name)
-            func = getattr(container, name)
+            if iscoroutinefunction(func) or isasyncgenfunction(func):
+                async_to_sync(container, name)
+                func = getattr(container, name)
 
             for tKey, tValue in tempConf.items():
                 setattr(func, tKey, tValue)

@@ -1,11 +1,10 @@
-from inspect import iscoroutinefunction
 from typing import Callable
 
 import pyrogram
 from pyrogram.filters import Filter
 from pyrogram.types import Message
 
-from .client import Client
+from .client import Client, is_async_callable
 from ..types import ListenerTypes, Identifier
 from ..utils import should_patch, patch_into
 
@@ -41,7 +40,7 @@ class MessageHandler(pyrogram.handlers.message_handler.MessageHandler):
         if listener:
             filters = listener.filters
             if callable(filters):
-                if iscoroutinefunction(filters.__call__):
+                if is_async_callable(filters):
                     listener_does_match = await filters(client, message)
                 else:
                     listener_does_match = await client.loop.run_in_executor(
@@ -59,7 +58,7 @@ class MessageHandler(pyrogram.handlers.message_handler.MessageHandler):
         )[0]
 
         if callable(self.filters):
-            if iscoroutinefunction(self.filters.__call__):
+            if is_async_callable(self.filters):
                 handler_does_match = await self.filters(client, message)
             else:
                 handler_does_match = await client.loop.run_in_executor(
@@ -81,18 +80,16 @@ class MessageHandler(pyrogram.handlers.message_handler.MessageHandler):
         if listener and listener_does_match:
             client.remove_listener(listener)
 
-            if listener.future and not listener.future.done():
-                listener.future.set_result(message)
+            if listener.future:
+                if not listener.future.done():
+                    listener.future.set_result(message)
 
-                raise pyrogram.StopPropagation
+                    raise pyrogram.StopPropagation
             elif listener.callback:
-                if iscoroutinefunction(listener.callback):
-                    await listener.callback(client, message, *args)
-                else:
-                    listener.callback(client, message, *args)
+                client.schedule_handler_callback(listener.callback, message, *args)
 
                 raise pyrogram.StopPropagation
             else:
                 raise ValueError("Listener must have either a future or a callback")
-        else:
-            await self.original_callback(client, message, *args)
+
+        await self.original_callback(client, message, *args)

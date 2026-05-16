@@ -1,5 +1,6 @@
 import asyncio
-from inspect import iscoroutinefunction
+import logging
+from inspect import iscoroutinefunction, unwrap
 from typing import Optional, Callable, Dict, List, Union
 
 import pyrogram
@@ -11,6 +12,93 @@ from ..types import ListenerTypes, Identifier, Listener
 from ..utils import should_patch, patch_into
 
 
+log = logging.getLogger(__name__)
+
+
+def is_async_callable(callback: Callable) -> bool:
+    call = getattr(callback, "__call__", None)
+
+    return (
+        iscoroutinefunction(callback)
+        or iscoroutinefunction(unwrap(callback))
+        or (
+            call is not None
+            and (
+                iscoroutinefunction(call)
+                or iscoroutinefunction(unwrap(call))
+            )
+        )
+    )
+
+
+class ListenerAwareQueue:
+    def __init__(self, client, queue: asyncio.Queue):
+        self.client = client
+        self.input_queue = asyncio.Queue()
+        self.output_queue = queue
+        self.pump_task = None
+
+    def __getattr__(self, name):
+        return getattr(self.output_queue, name)
+
+    def put_nowait(self, packet):
+        if packet is None:
+            self.input_queue.put_nowait(packet)
+            self.ensure_pump()
+            return
+
+        has_backlog = self.pump_task is not None and not self.pump_task.done()
+        if not has_backlog and not self.client.has_listeners():
+            self.output_queue.put_nowait(packet)
+            return
+
+        self.input_queue.put_nowait(packet)
+        self.ensure_pump()
+
+    async def put(self, packet):
+        self.put_nowait(packet)
+
+    async def get(self):
+        return await self.output_queue.get()
+
+    def empty(self):
+        return self.input_queue.empty() and self.output_queue.empty()
+
+    def qsize(self):
+        return self.input_queue.qsize() + self.output_queue.qsize()
+
+    def ensure_pump(self):
+        if self.pump_task is None or self.pump_task.done():
+            self.pump_task = self.client.loop.create_task(self.pump())
+
+    async def pump(self):
+        try:
+            while True:
+                packet = await self.input_queue.get()
+
+                if packet is None:
+                    self.output_queue.put_nowait(None)
+                else:
+                    consumed = False
+                    try:
+                        consumed = await self.client.resolve_listener_from_packet(
+                            packet
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to resolve kurimod listener before dispatch"
+                        )
+
+                    if not consumed:
+                        self.output_queue.put_nowait(packet)
+
+                if self.input_queue.empty():
+                    break
+        finally:
+            self.pump_task = None
+            if not self.input_queue.empty():
+                self.ensure_pump()
+
 
 @patch_into(pyrogram.client.Client)
 class Client(pyrogram.client.Client):
@@ -20,7 +108,11 @@ class Client(pyrogram.client.Client):
     @should_patch()
     def __init__(self, *args, **kwargs):
         self.listeners = {listener_type: [] for listener_type in ListenerTypes}
+        self.kurimod_handler_tasks = set()
         self.old__init__(*args, **kwargs)
+        self.dispatcher.updates_queue = ListenerAwareQueue(
+            self, self.dispatcher.updates_queue
+        )
 
     @should_patch()
     async def listen(
@@ -112,6 +204,144 @@ class Client(pyrogram.client.Client):
             pass
 
     @should_patch()
+    def schedule_handler_callback(self, callback: Callable, *args):
+        async def runner():
+            try:
+                if is_async_callable(callback):
+                    await callback(self, *args)
+                else:
+                    await self.loop.run_in_executor(
+                        self.executor, callback, self, *args
+                    )
+            except (pyrogram.StopPropagation, pyrogram.ContinuePropagation):
+                pass
+            except Exception:
+                log.exception("Unhandled exception in kurimod handler callback")
+
+        task = self.loop.create_task(runner())
+        self.kurimod_handler_tasks.add(task)
+        task.add_done_callback(self.kurimod_handler_tasks.discard)
+        return task
+
+    @should_patch()
+    def has_listeners(self) -> bool:
+        return any(self.listeners[listener_type] for listener_type in ListenerTypes)
+
+    @should_patch()
+    def compose_message_identifier(self, message) -> Identifier:
+        from_user = message.from_user
+        from_user_id = from_user.id if from_user else None
+        from_user_username = from_user.username if from_user else None
+        message_id = getattr(message, "id", getattr(message, "message_id", None))
+        chat = message.chat
+        chat_id = [chat.id, chat.username] if chat else None
+
+        return Identifier(
+            message_id=message_id,
+            chat_id=chat_id,
+            from_user_id=[from_user_id, from_user_username],
+        )
+
+    @should_patch()
+    def compose_callback_query_identifier(self, query) -> Identifier:
+        from_user = query.from_user
+        from_user_id = from_user.id if from_user else None
+        from_user_username = from_user.username if from_user else None
+
+        chat_id = None
+        message_id = None
+
+        if query.message:
+            message_id = getattr(
+                query.message, "id", getattr(query.message, "message_id", None)
+            )
+
+            if query.message.chat:
+                chat_id = [query.message.chat.id, query.message.chat.username]
+
+        return Identifier(
+            message_id=message_id,
+            chat_id=chat_id,
+            from_user_id=[from_user_id, from_user_username],
+            inline_message_id=query.inline_message_id,
+        )
+
+    @should_patch()
+    async def listener_filter_matches(self, listener: Listener, update) -> bool:
+        filters = listener.filters
+
+        if callable(filters):
+            if is_async_callable(filters):
+                return await filters(self, update)
+
+            return await self.loop.run_in_executor(None, filters, self, update)
+
+        return True
+
+    @should_patch()
+    async def resolve_listener_from_packet(self, packet) -> bool:
+        if not self.has_listeners():
+            return False
+
+        update, users, chats = packet
+        parser = self.dispatcher.update_parsers.get(type(update))
+
+        if parser is None:
+            return False
+
+        parsed_update, handler_type = await parser(update, users, chats)
+        if parsed_update is None:
+            return False
+
+        if handler_type is pyrogram.handlers.message_handler.MessageHandler:
+            return await self.resolve_listener_update(
+                parsed_update, ListenerTypes.MESSAGE
+            )
+
+        if (
+            handler_type
+            is pyrogram.handlers.callback_query_handler.CallbackQueryHandler
+        ):
+            return await self.resolve_listener_update(
+                parsed_update, ListenerTypes.CALLBACK_QUERY
+            )
+
+        return False
+
+    @should_patch()
+    async def resolve_listener_update(
+        self, update, listener_type: ListenerTypes
+    ) -> bool:
+        if listener_type == ListenerTypes.MESSAGE:
+            identifier = self.compose_message_identifier(update)
+        elif listener_type == ListenerTypes.CALLBACK_QUERY:
+            identifier = self.compose_callback_query_identifier(update)
+        else:
+            return False
+
+        listener = self.get_listener_matching_with_data(identifier, listener_type)
+        if not listener:
+            return False
+
+        if not await self.listener_filter_matches(listener, update):
+            return False
+
+        self.remove_listener(listener)
+
+        if listener.future:
+            if listener.future.done():
+                return False
+
+            listener.future.set_result(update)
+            return True
+
+        if listener.callback:
+            self.schedule_handler_callback(listener.callback, update)
+            return True
+
+        raise ValueError("Listener must have either a future or a callback")
+
+    @should_patch()
     def get_listener_matching_with_data(
         self, data: Identifier, listener_type: ListenerTypes
     ) -> Optional[Listener]:
@@ -189,7 +419,7 @@ class Client(pyrogram.client.Client):
     async def stop_listener(self, listener: Listener):
         self.remove_listener(listener)
 
-        if listener.future.done():
+        if listener.future is None or listener.future.done():
             return
 
         if callable(config.stopped_handler):

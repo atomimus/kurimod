@@ -1,11 +1,10 @@
-from inspect import iscoroutinefunction
 from typing import Callable, Tuple
 
 import pyrogram
 from pyrogram.filters import Filter
 from pyrogram.types import CallbackQuery
 
-from .client import Client
+from .client import Client, is_async_callable
 from ..config import config
 from ..types import ListenerTypes, Identifier, Listener
 from ..utils import patch_into, should_patch
@@ -61,7 +60,7 @@ class CallbackQueryHandler(
         if listener:
             filters = listener.filters
             if callable(filters):
-                if iscoroutinefunction(filters.__call__):
+                if is_async_callable(filters):
                     listener_does_match = await filters(client, query)
                 else:
                     listener_does_match = await client.loop.run_in_executor(
@@ -79,7 +78,7 @@ class CallbackQueryHandler(
         )
 
         if callable(self.filters):
-            if iscoroutinefunction(self.filters.__call__):
+            if is_async_callable(self.filters):
                 handler_does_match = await self.filters(client, query)
             else:
                 handler_does_match = await client.loop.run_in_executor(
@@ -129,18 +128,16 @@ class CallbackQueryHandler(
         if listener and listener_does_match:
             client.remove_listener(listener)
 
-            if listener.future and not listener.future.done():
-                listener.future.set_result(query)
+            if listener.future:
+                if not listener.future.done():
+                    listener.future.set_result(query)
 
-                raise pyrogram.StopPropagation
+                    raise pyrogram.StopPropagation
             elif listener.callback:
-                if iscoroutinefunction(listener.callback):
-                    await listener.callback(client, query, *args)
-                else:
-                    listener.callback(client, query, *args)
+                client.schedule_handler_callback(listener.callback, query, *args)
 
                 raise pyrogram.StopPropagation
             else:
                 raise ValueError("Listener must have either a future or a callback")
-        else:
-            await self.original_callback(client, query, *args)
+
+        await self.original_callback(client, query, *args)

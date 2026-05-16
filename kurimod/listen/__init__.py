@@ -18,6 +18,7 @@ You should have received a copy of the GNU General Public License
 along with kurimod.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+from .dispatcher import Dispatcher
 from .callback_query_handler import CallbackQueryHandler
 from .chat import Chat
 from .client import Client
@@ -32,4 +33,5 @@ __all__ = [
     "Chat",
     "User",
     "CallbackQueryHandler",
+    "Dispatcher",
 ]
